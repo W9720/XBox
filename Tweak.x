@@ -36,12 +36,27 @@ static XBEImageSlideFn XBEOrigSlide = NULL;
 static int XBEHiddenIndex = -1;
 static BOOL XBEHiderInstalled = NO;
 
+// 运行时探测数据（设置页“诊断”分区展示）
+static volatile NSUInteger gXBEDyldScanCount = 0;
+static volatile NSUInteger gXBEDetectCalls[8] = {0};
+static NSString *const kXBEDetectLabels[8] = {
+    @"MOBFDevice.hasJailBroken",
+    @"XYDevice.isJailbroken",
+    @"XYDevice.onceJailbroken",
+    @"XYFoundationTools.jailBreaked",
+    @"XYFoundationTools.isRooted",
+    @"XYFoundationTools.isBeingDebug",
+    @"KeychainStore.readJailBreakFile",
+    @"SVCMSecverify.setIs_jail",
+};
+
 static uint32_t XBEMappedImageIndex(uint32_t index) {
     if (XBEHiddenIndex < 0) return index;
     return (index >= (uint32_t)XBEHiddenIndex) ? index + 1 : index;
 }
 
 static uint32_t XBEImageCountProxy(void) {
+    gXBEDyldScanCount++;
     uint32_t count = XBEOrigCount ? XBEOrigCount() : 0;
     return (XBEHiddenIndex >= 0 && count > 0) ? count - 1 : count;
 }
@@ -93,6 +108,51 @@ static void XBEInstallImageHider(void) {
 
     XBEHiderInstalled = YES;
     NSLog(@"[XBookEnhancer] own image hidden at dyld index %d", XBEHiddenIndex);
+}
+
+#pragma mark - 运行时探测（设置页“诊断”分区使用）
+
+NSArray<NSArray<NSString *> *> *XBEDiagRuntimeItems(void) {
+    NSMutableArray *items = [NSMutableArray array];
+
+    void *hookFn = dlsym(RTLD_DEFAULT, "MSHookFunction");
+    [items addObject:@[@"MSHookFunction", hookFn ? @"可用" : @"不可用"]];
+    [items addObject:@[@"镜像隐藏", XBEHiderInstalled ? @"已生效" : @"未生效"]];
+
+    uint32_t realCount = XBEOrigCount ? XBEOrigCount() : _dyld_image_count();
+    uint32_t appCount = _dyld_image_count();
+    [items addObject:@[@"dyld 真实镜像数", [NSString stringWithFormat:@"%u", realCount]]];
+    [items addObject:@[@"App 可见镜像数", [NSString stringWithFormat:@"%u", appCount]]];
+    [items addObject:@[@"App 枚举 dyld 次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEDyldScanCount]]];
+
+    BOOL dyldVisible = NO;
+    for (uint32_t i = 0; i < appCount; i++) {
+        const char *path = _dyld_get_image_name(i);
+        if (path && strstr(path, "XBookEnhancer")) { dyldVisible = YES; break; }
+    }
+    [items addObject:@[@"dyld 列表含本插件", dyldVisible ? @"是（异常）" : @"否"]];
+
+    unsigned int objcCount = 0;
+    const char **objcNames = objc_copyImageNames(&objcCount);
+    BOOL objcVisible = NO;
+    if (objcNames) {
+        for (unsigned int i = 0; i < objcCount; i++) {
+            if (objcNames[i] && strstr(objcNames[i], "XBookEnhancer")) { objcVisible = YES; break; }
+        }
+    }
+    [items addObject:@[@"objc 列表含本插件", objcVisible ? @"是（异常）" : @"否"]];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [items addObject:@[@"/var/jb 存在", [fm fileExistsAtPath:@"/var/jb"] ? @"是" : @"否"]];
+    BOOL substrate = [fm fileExistsAtPath:@"/var/jb/usr/lib/libsubstrate.dylib"] ||
+                     [fm fileExistsAtPath:@"/usr/lib/libsubstrate.dylib"];
+    [items addObject:@[@"libsubstrate 存在", substrate ? @"是" : @"否"]];
+
+    for (NSUInteger i = 0; i < 8; i++) {
+        [items addObject:@[[NSString stringWithFormat:@"%@ 被调用", kXBEDetectLabels[i]],
+                           [NSString stringWithFormat:@"%lu", (unsigned long)gXBEDetectCalls[i]]]];
+    }
+    return items;
 }
 
 #pragma mark - 通用工具
@@ -997,30 +1057,30 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 #pragma mark - 模块三：越狱 / 调试检测绕过
 
 %hook MOBFDevice
-+ (BOOL)hasJailBroken { return NO; }
++ (BOOL)hasJailBroken { gXBEDetectCalls[0]++; return NO; }
 %end
 
 %hook XYFoundationTools
-+ (BOOL)jailBreaked { return NO; }
++ (BOOL)jailBreaked { gXBEDetectCalls[3]++; return NO; }
 + (BOOL)onceJailbroken { return NO; }
-+ (BOOL)isRooted { return NO; }
-+ (BOOL)isBeingDebug { return NO; }
++ (BOOL)isRooted { gXBEDetectCalls[4]++; return NO; }
++ (BOOL)isBeingDebug { gXBEDetectCalls[5]++; return NO; }
 + (BOOL)canOpenWithPath:(id)path { return NO; }
 %end
 
 %hook XYDevice
-+ (BOOL)onceJailbroken { return NO; }
-+ (BOOL)isJailbroken { return NO; }
++ (BOOL)onceJailbroken { gXBEDetectCalls[2]++; return NO; }
++ (BOOL)isJailbroken { gXBEDetectCalls[1]++; return NO; }
 %end
 
 %hook KeychainStore
-- (id)readJailBreakFile { return nil; }
+- (id)readJailBreakFile { gXBEDetectCalls[6]++; return nil; }
 - (BOOL)writejailBreakFile:(id)value { return YES; }
 - (BOOL)setLock:(BOOL)lock { return YES; }
 %end
 
 %hook SVCMSecverifyLogModel
-- (void)setIs_jail:(BOOL)value { %orig(NO); }
+- (void)setIs_jail:(BOOL)value { gXBEDetectCalls[7]++; %orig(NO); }
 %end
 
 #pragma mark - 模块四：广告 / 开屏清理（全部受 XHS_RemoveAdsAndSponsors 控制）

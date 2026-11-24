@@ -1,6 +1,9 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+// 实现位于 Tweak.x：运行时探测数据
+extern NSArray<NSArray<NSString *> *> *XBEDiagRuntimeItems(void);
+
 // 设置面板：对应原插件 X_MenuViewController 的四个分类
 // 所有开关直接使用逆向确证的真实键；未实现行为的开关仅存储值，不影响现有逻辑。
 
@@ -78,7 +81,14 @@ static NSArray<NSArray<NSString *> *> *XBEDiagnostics(void) {
         BOOL found = objc_getClass(name.UTF8String) != NULL;
         [items addObject:@[name, found ? @"存在" : @"缺失"]];
     }
+    NSArray<NSArray<NSString *> *> *runtime = XBEDiagRuntimeItems();
+    if (runtime.count) [items addObjectsFromArray:runtime];
     return items;
+}
+
+static BOOL XBEDiagValueIsBad(NSString *value) {
+    return [value isEqualToString:@"缺失"] || [value containsString:@"异常"] ||
+           [value containsString:@"未生效"] || [value containsString:@"不可用"];
 }
 
 @interface XBEFloatingEntry : NSObject
@@ -112,6 +122,11 @@ static NSArray<NSArray<NSString *> *> *XBEDiagnostics(void) {
                                                       action:@selector(close)];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData];
+}
+
 - (void)close {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
@@ -143,7 +158,7 @@ static NSArray<NSArray<NSString *> *> *XBEDiagnostics(void) {
         NSArray<NSString *> *item = XBEDiagnostics()[indexPath.row];
         cell.textLabel.text = item[0];
         cell.detailTextLabel.text = item[1];
-        cell.detailTextLabel.textColor = [item[1] isEqualToString:@"缺失"]
+        cell.detailTextLabel.textColor = XBEDiagValueIsBad(item[1])
             ? [UIColor systemRedColor] : [UIColor secondaryLabelColor];
         return cell;
     }
