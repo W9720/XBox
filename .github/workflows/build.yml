@@ -14,12 +14,27 @@ jobs:
 
       - name: 安装编译依赖
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y build-essential clang lld llvm make xz-utils fakeroot pkg-config \
             libssl-dev libplist-dev libc6-dev zlib1g-dev
+          # lld 是多调用二进制：必须以 "ld64.lld" 的名字执行才是 Mach-O 链接器
+          if [ ! -e /usr/bin/ld64.lld ]; then
+            for c in /usr/bin/ld64.lld-* /usr/bin/lld-*; do
+              if [ -e "$c" ]; then sudo ln -sfn "$c" /usr/bin/ld64.lld; break; fi
+            done
+          fi
+          if [ ! -e /usr/bin/llvm-strip ]; then
+            for c in /usr/bin/llvm-strip-*; do
+              if [ -e "$c" ]; then sudo ln -sfn "$c" /usr/bin/llvm-strip; break; fi
+            done
+          fi
+          test -e /usr/bin/ld64.lld
+          /usr/bin/ld64.lld --version | head -2
 
       - name: 编译安装 ldid
         run: |
+          set -e
           git clone --depth=1 --recursive https://github.com/ProcursusTeam/ldid.git "$HOME/ldid-src"
           cd "$HOME/ldid-src"
           make -j"$(nproc)"
@@ -28,6 +43,7 @@ jobs:
 
       - name: 安装 Theos 与 iOS SDK
         run: |
+          set -e
           git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           git clone --depth=1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$HOME/sdks-src"
@@ -36,37 +52,48 @@ jobs:
           mkdir -p "$HOME/theos/sdks"
           cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
           chmod +x "$HOME/theos/bin/"*
-          # Linux 下 Theos 需要 toolchain/linux/iphone/bin/*，逐项指向系统工具
-          # 关键：ld 必须是 Mach-O 链接器 ld64.lld，不能是 GNU ld
+
           TC="$HOME/theos/toolchain/linux/iphone"
           mkdir -p "$TC/bin"
-          if [ ! -e /usr/bin/ld64.lld ]; then
-            src="$(ls /usr/bin/ld64.lld-* 2>/dev/null | head -1)"
-            if [ -n "$src" ]; then sudo ln -sfn "$src" /usr/bin/ld64.lld; fi
-          fi
-          if [ ! -e /usr/bin/llvm-strip ]; then
-            src="$(ls /usr/bin/llvm-strip-* 2>/dev/null | head -1)"
-            if [ -n "$src" ]; then sudo ln -sfn "$src" /usr/bin/llvm-strip; fi
-          fi
           ln -sfn /usr/bin/clang "$TC/bin/clang"
           ln -sfn /usr/bin/clang++ "$TC/bin/clang++"
-          ln -sfn /usr/bin/ld64.lld "$TC/bin/ld"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64.lld"
           ln -sfn /usr/bin/llvm-strip "$TC/bin/strip"
-          # 让 clang 在 PATH 中优先找到 Mach-O 版 ld
+
+          # 关键：不能把链接器直接命名为 "ld"。
+          # lld 依据 argv[0] 选择 flavor，名为 "ld" 时会进入 GNU/ELF 模式，
+          # 于是 Darwin 参数（-dynamic/-dylib/-arch/-framework...）全部报 unknown argument。
+          # 用包装脚本强制以 ld64.lld 身份执行，确保走 Mach-O 模式。
+          printf '#!/bin/sh\nexec /usr/bin/ld64.lld "$@"\n' > "$TC/bin/ld"
+          chmod +x "$TC/bin/ld"
+          # 全局兜底：Theos 若直接取 PATH 中的 ld，也命中 Mach-O 链接器
+          printf '#!/bin/sh\nexec /usr/bin/ld64.lld "$@"\n' | sudo tee /usr/local/bin/ld >/dev/null
+          sudo chmod +x /usr/local/bin/ld
+
           echo "$TC/bin" >> "$GITHUB_PATH"
           ls -l "$TC/bin"
+
+      - name: 链接器冒烟测试
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/theos/toolchain/linux/iphone/bin:$PATH"
+          SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
+          printf 'int xbe_probe(void){return 0;}\n' > /tmp/probe.c
+          clang -target arm64-apple-ios15.0 -isysroot "$SDK" -c /tmp/probe.c -o /tmp/probe.o
+          ld -arch arm64 -dylib -iphoneos_version_min 15.0 -syslibroot "$SDK" \
+             -o /tmp/probe.dylib /tmp/probe.o -L"$SDK/usr/lib" -lSystem
+          file /tmp/probe.dylib
+          echo "链接器冒烟测试通过"
 
       - name: 环境自检
         run: |
           echo "--- clang"; clang --version | head -3
-          echo "--- ld"; command -v ld; readlink -f "$(command -v ld)" || true
-          echo "--- ld64.lld"; which ld64.lld && ld64.lld --version | head -2
+          echo "--- ld"; command -v ld; head -2 "$(command -v ld)" 2>/dev/null || true
+          echo "--- ld64.lld"; /usr/bin/ld64.lld --version | head -2
           echo "--- ldid"; ldid -v || true
           echo "--- dpkg-deb"; dpkg-deb --version | head -1
           echo "--- sdks"; ls "$THEOS/sdks"
-          echo "--- theos"; ls "$THEOS" | head
 
       - name: 编译打包（正式版，无debug）
         run: |
@@ -74,7 +101,7 @@ jobs:
           make clean 2>/dev/null || true
           make package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee build.log
           echo "--- generated packages:"
-          ls -l packages/ || true
+          ls -l packages/
 
       - name: 上传deb文件
         uses: actions/upload-artifact@v4
@@ -90,14 +117,3 @@ jobs:
           name: build-log
           path: build.log
           if-no-files-found: ignore
-
-      - name: 失败时把日志推到 ci-log 分支
-        if: failure()
-        run: |
-          cp build.log build-failure.log 2>/dev/null || true
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git checkout -B ci-log
-          git add -f build-failure.log
-          git commit -m "ci: failure log" || true
-          git push -f origin ci-log || true
