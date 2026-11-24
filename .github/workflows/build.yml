@@ -7,7 +7,6 @@ on:
 
 jobs:
   build:
-    # macOS runner 在该账号下不可用；Ubuntu 源里没有 ldid，改为源码编译
     runs-on: ubuntu-22.04
     steps:
       - name: 拉取项目代码
@@ -16,7 +15,7 @@ jobs:
       - name: 安装编译依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang make xz-utils fakeroot pkg-config \
+          sudo apt-get install -y build-essential clang lld llvm make xz-utils fakeroot pkg-config \
             libssl-dev libplist-dev libc6-dev zlib1g-dev
 
       - name: 编译安装 ldid
@@ -38,10 +37,19 @@ jobs:
           cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
           chmod +x "$HOME/theos/bin/"*
 
+      - name: 环境自检
+        run: |
+          echo "--- clang"; clang --version | head -3
+          echo "--- ld64.lld"; which ld64.lld && ld64.lld --version | head -2
+          echo "--- ldid"; ldid -v || true
+          echo "--- dpkg-deb"; dpkg-deb --version | head -1
+          echo "--- sdks"; ls "$THEOS/sdks"
+          echo "--- theos"; ls "$THEOS" | head
+
       - name: 编译打包（正式版，无debug）
         run: |
           make clean 2>/dev/null || true
-          make package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless
+          make package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee build.log
 
       - name: 上传deb文件
         uses: actions/upload-artifact@v4
@@ -49,3 +57,11 @@ jobs:
           name: Deb-Package
           path: packages/*.deb
           if-no-files-found: error
+
+      - name: 上传构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
