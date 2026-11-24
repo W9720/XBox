@@ -36,9 +36,19 @@ jobs:
           mkdir -p "$HOME/theos/sdks"
           cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
           chmod +x "$HOME/theos/bin/"*
-          # Linux 下 Theos 需要 toolchain/linux/iphone/bin/clang，软链系统工具链
-          mkdir -p "$HOME/theos/toolchain/linux"
-          ln -sfn /usr "$HOME/theos/toolchain/linux/iphone"
+          # Linux 下 Theos 需要 toolchain/linux/iphone/bin/*，逐项指向系统工具
+          # 关键：ld 必须指向 Mach-O 链接器 ld64.lld，不能是 GNU ld
+          TC="$HOME/theos/toolchain/linux/iphone"
+          mkdir -p "$TC/bin"
+          ln -sfn /usr/bin/clang "$TC/bin/clang"
+          ln -sfn /usr/bin/clang++ "$TC/bin/clang++"
+          ln -sfn /usr/bin/ld64.lld "$TC/bin/ld"
+          ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64"
+          ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64.lld"
+          ln -sfn /usr/bin/llvm-strip "$TC/bin/strip"
+          ln -sfn /usr/bin/llvm-objcopy "$TC/bin/objcopy"
+          ln -sfn /usr/bin/llvm-install-name-tool "$TC/bin/install_name_tool"
+          ls -l "$TC/bin"
 
       - name: 环境自检
         run: |
