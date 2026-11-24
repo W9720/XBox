@@ -1,46 +1,42 @@
-name: Build
+name: 打包无根越狱deb
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
+    # 账号不支持 arm64 runner，固定使用 Intel 的 macos-13
     runs-on: macos-13
     steps:
-      - name: Checkout
+      - name: 拉取项目代码
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Setup Theos
+      - name: 安装完整Theos环境
         run: |
-          brew install ldid xz make
-          git clone --depth=1 https://github.com/theos/theos.git "$HOME/theos"
-          git clone --depth=1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$HOME/theos-sdks"
-          cd "$HOME/theos-sdks"
+          git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$HOME/sdks-src"
+          cd "$HOME/sdks-src"
           git sparse-checkout set iPhoneOS16.5.sdk
           mkdir -p "$HOME/theos/sdks"
-          cp -R "$HOME/theos-sdks/"*.sdk "$HOME/theos/sdks/"
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
+          brew install ldid xz make
+          chmod +x "$HOME/theos/bin/"*
 
-      - name: Build package
+      - name: 编译打包（正式版，无debug）
         run: |
           MAKE_BIN="$(command -v gmake || command -v make)"
           echo "using $MAKE_BIN"
           "$MAKE_BIN" clean 2>/dev/null || true
-          "$MAKE_BIN" package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          "$MAKE_BIN" package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless
 
-      - name: Upload deb
+      - name: 上传deb文件
         uses: actions/upload-artifact@v4
         with:
-          name: XBookEnhancer-rootless
+          name: Deb-Package
           path: packages/*.deb
           if-no-files-found: error
-
-      - name: Upload dylib
-        uses: actions/upload-artifact@v4
-        with:
-          name: XBookEnhancer-dylib
-          path: .theos/obj/**/*.dylib
-          if-no-files-found: ignore
