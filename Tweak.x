@@ -16,6 +16,7 @@
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
 #import <string.h>
+#import <stdlib.h>
 
 #pragma mark - 反注入检测：对 App 隐藏本插件镜像
 
@@ -35,6 +36,33 @@ static XBEImageHeaderFn XBEOrigHeader = NULL;
 static XBEImageSlideFn XBEOrigSlide = NULL;
 static int XBEHiddenIndex = -1;
 static BOOL XBEHiderInstalled = NO;
+
+// objc_copyImageNames 拦截（App 实测走这条路能看到本插件）
+typedef const char **(*XBECopyImageNamesFn)(unsigned int *);
+static XBECopyImageNamesFn XBEOrigCopyImageNames = NULL;
+static volatile NSUInteger gXBEObjcScanCount = 0;
+
+static const char **XBECopyImageNamesProxy(unsigned int *outCount) {
+    gXBEObjcScanCount++;
+    unsigned int total = 0;
+    const char **original = XBEOrigCopyImageNames ? XBEOrigCopyImageNames(&total) : NULL;
+    if (!original) {
+        if (outCount) *outCount = 0;
+        return NULL;
+    }
+    // 返回全新分配的数组/字符串，符合 objc_copyImageNames 的调用方释放契约，同时过滤自身
+    const char **filtered = (const char **)calloc((size_t)total + 1, sizeof(char *));
+    unsigned int kept = 0;
+    for (unsigned int i = 0; i < total; i++) {
+        const char *path = original[i];
+        if (!path) continue;
+        if (strstr(path, "XBookEnhancer") || strstr(path, "XHS.J")) continue;
+        filtered[kept++] = strdup(path);
+    }
+    filtered[kept] = NULL;
+    if (outCount) *outCount = kept;
+    return filtered;
+}
 
 // 运行时探测数据（设置页“诊断”分区展示）
 static volatile NSUInteger gXBEDyldScanCount = 0;
@@ -105,6 +133,8 @@ static void XBEInstallImageHider(void) {
     hookFn(symName, (void *)XBEImageNameProxy, (void **)&XBEOrigName);
     if (symHeader) hookFn(symHeader, (void *)XBEImageHeaderProxy, (void **)&XBEOrigHeader);
     if (symSlide) hookFn(symSlide, (void *)XBEImageSlideProxy, (void **)&XBEOrigSlide);
+    void *symObjcNames = dlsym(RTLD_DEFAULT, "objc_copyImageNames");
+    if (symObjcNames) hookFn(symObjcNames, (void *)XBECopyImageNamesProxy, (void **)&XBEOrigCopyImageNames);
 
     XBEHiderInstalled = YES;
     NSLog(@"[XBookEnhancer] own image hidden at dyld index %d", XBEHiddenIndex);
@@ -124,6 +154,7 @@ NSArray<NSArray<NSString *> *> *XBEDiagRuntimeItems(void) {
     [items addObject:@[@"dyld 真实镜像数", [NSString stringWithFormat:@"%u", realCount]]];
     [items addObject:@[@"App 可见镜像数", [NSString stringWithFormat:@"%u", appCount]]];
     [items addObject:@[@"App 枚举 dyld 次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEDyldScanCount]]];
+    [items addObject:@[@"App 枚举 objc 次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEObjcScanCount]]];
 
     BOOL dyldVisible = NO;
     for (uint32_t i = 0; i < appCount; i++) {
