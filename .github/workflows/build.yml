@@ -7,15 +7,19 @@ on:
 
 jobs:
   build:
-    # 账号不支持 arm64 runner，固定使用 Intel 的 macos-13
-    runs-on: macos-13
+    # macOS runner 在该账号下不可用（一直 Waiting for a runner），改用 Linux 编译
+    runs-on: ubuntu-latest
     steps:
       - name: 拉取项目代码
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: 安装完整Theos环境
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make ldid xz-utils fakeroot \
+            libssl-dev libplist-dev libc6-dev libstdc++-12-dev
+
+      - name: 安装 Theos 与 iOS SDK
         run: |
           git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
@@ -24,15 +28,12 @@ jobs:
           git sparse-checkout set iPhoneOS16.5.sdk
           mkdir -p "$HOME/theos/sdks"
           cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
-          brew install ldid xz make
           chmod +x "$HOME/theos/bin/"*
 
       - name: 编译打包（正式版，无debug）
         run: |
-          MAKE_BIN="$(command -v gmake || command -v make)"
-          echo "using $MAKE_BIN"
-          "$MAKE_BIN" clean 2>/dev/null || true
-          "$MAKE_BIN" package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless
+          make clean 2>/dev/null || true
+          make package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless
 
       - name: 上传deb文件
         uses: actions/upload-artifact@v4
