@@ -90,3 +90,14 @@ jobs:
           name: build-log
           path: build.log
           if-no-files-found: ignore
+
+      - name: 失败时把日志推到 ci-log 分支
+        if: failure()
+        run: |
+          cp build.log build-failure.log 2>/dev/null || true
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout -B ci-log
+          git add -f build-failure.log
+          git commit -m "ci: failure log" || true
+          git push -f origin ci-log || true
