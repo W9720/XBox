@@ -45,9 +45,12 @@ jobs:
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64.lld"
-          ln -sfn /usr/bin/llvm-strip "$TC/bin/strip"
-          ln -sfn /usr/bin/llvm-objcopy "$TC/bin/objcopy"
-          ln -sfn /usr/bin/llvm-install-name-tool "$TC/bin/install_name_tool"
+          for t in llvm-strip:strip llvm-objcopy:objcopy llvm-install-name-tool:install_name_tool; do
+            src_name="${t%%:*}"; dst_name="${t##*:}"
+            src="$(command -v "$src_name" || true)"
+            if [ -z "$src" ]; then src="$(ls /usr/bin/${src_name}-* 2>/dev/null | head -1)"; fi
+            if [ -n "$src" ]; then ln -sfn "$src" "$TC/bin/$dst_name"; fi
+          done
           ls -l "$TC/bin"
 
       - name: 环境自检
