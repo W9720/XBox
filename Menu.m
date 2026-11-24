@@ -42,7 +42,7 @@ static NSArray<NSArray<XBEKeyRow *> *> *XBESectionRows(void) {
                 [XBEKeyRow row:@"评论区表情下载" key:@"XHS_EnableCommentsEmojiDownload" on:NO],
             ],
             @[
-                [XBEKeyRow row:@"移除板块赞助·广告" key:@"XHS_RemoveAdsAndSponsors" on:YES],
+                [XBEKeyRow row:@"移除板块赞助·广告" key:@"XHS_RemoveAdsAndSponsors" on:NO],
                 [XBEKeyRow row:@"移除底栏热门板块" key:@"XHS_RemoveBottomTabHot" on:NO],
                 [XBEKeyRow row:@"移除底栏购物板块" key:@"XHS_RemoveBottomTabShop" on:NO],
                 [XBEKeyRow row:@"移除底栏消息板块" key:@"XHS_RemoveBottomTabMessage" on:NO],

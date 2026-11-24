@@ -81,6 +81,11 @@ static BOOL XHSREnabledDefaultNo(NSString *key) {
     return [d boolForKey:key];
 }
 
+// 广告/开屏清理：会改动 App 自身的模型装配，必须严格受开关控制
+static BOOL XHSRAdsRemovalEnabled(void) {
+    return XHSREnabledDefaultNo(@"XHS_RemoveAdsAndSponsors");
+}
+
 // 自动命名时间戳（对应 XHS_AutomaticFileNaming）
 static NSString *XHSRDateName(void) {
     static NSDateFormatter *fmt;
@@ -737,29 +742,7 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
     background.image = image;
 }
 
-// 顶层控制器（原插件 class_addMethod 注入）
-@interface UIViewController (XHSRTopLookup)
-- (UIViewController *)topViewController;
-@end
-
 %hook UIViewController
-
-%new
-- (UIViewController *)topViewController {
-    UIViewController *vc = self;
-    while (vc.presentedViewController) {
-        vc = vc.presentedViewController;
-    }
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        UIViewController *top = ((UINavigationController *)vc).topViewController;
-        return top ? [top topViewController] : vc;
-    }
-    if ([vc isKindOfClass:[UITabBarController class]]) {
-        UIViewController *sel = ((UITabBarController *)vc).selectedViewController;
-        return sel ? [sel topViewController] : vc;
-    }
-    return vc;
-}
 
 // 对应原插件 Hook 95：viewDidAppear 后按字体功能应用自定义字体
 - (void)viewDidAppear:(BOOL)animated {
@@ -959,82 +942,138 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 - (void)setIs_jail:(BOOL)value { %orig(NO); }
 %end
 
-#pragma mark - 模块四：广告 / 开屏清理
+#pragma mark - 模块四：广告 / 开屏清理（全部受 XHS_RemoveAdsAndSponsors 控制）
 
 %hook XYFFNoteAdsCellController
-- (void)setAdsCell:(id)value { %orig(nil); }
+- (void)setAdsCell:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashTrackHelper_CPT
-- (void)setAds:(id)value { %orig(nil); }
+- (void)setAds:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAPMTracker
-- (void)setAdsID:(id)value { %orig(nil); }
+- (void)setAdsID:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAdsResourceTask
-- (void)setAds:(id)value { %orig(nil); }
+- (void)setAds:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAdsInfo
-- (void)setAds:(id)value { %orig(nil); }
+- (void)setAds:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAdsConfig
-- (void)setAdsGroups:(id)value { %orig(nil); }
+- (void)setAdsGroups:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAdsGroupInfo_CPT
-- (void)setAds:(id)value { %orig(nil); }
+- (void)setAds:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAdsConfig_CPT
-- (void)setAdsGroups:(id)value { %orig(nil); }
+- (void)setAdsGroups:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
 %end
 
 %hook XYPHSplashAdsOpenAppView
-- (void)createSubviews {}
+- (void)createSubviews {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+}
 %end
 
 %hook XYPHVideoContentAdManager
-- (void)setAdsModel:(id)value { %orig(nil); }
-- (id)initWithAdvertisementModel:(id)model { return nil; }
+- (void)setAdsModel:(id)value {
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
+}
+- (id)initWithAdvertisementModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYVFAdvertisementViewModel
-- (id)initWithContentModel:(id)model { return nil; }
+- (id)initWithContentModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYFeedAdsLandingPagelnfo
-- (id)initWithNativeModel:(id)model { return nil; }
+- (id)initWithNativeModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYFeedAdsLandingSinglePage
-- (id)initWithNativeModel:(id)model { return nil; }
+- (id)initWithNativeModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYFeedAdsCellViewModel
-- (id)initWithNativeModel:(id)model { return nil; }
+- (id)initWithNativeModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYFeedAdsCellButtonInfo
-- (id)initWithNativeModel:(id)model { return nil; }
+- (id)initWithNativeModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYFeedAdsCellVideolnfo
-- (id)initWithNativeModel:(id)model { return nil; }
+- (id)initWithNativeModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYFeedAdsCelllmagelnfo
-- (id)initWithNativeModel:(id)model { return nil; }
+- (id)initWithNativeModel:(id)model {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return nil;
+}
 %end
 
 %hook XYIndepHomeFeedDataSource
-- (BOOL)handleCharacteristicSplashAd { return XHSREnabledDefaultNo(@"XHS_RemoveAdsAndSponsors") ? NO : %orig; }
+- (BOOL)handleCharacteristicSplashAd {
+    if (!XHSRAdsRemovalEnabled()) return %orig;
+    return NO;
+}
 - (void)setSplashModel:(id)model {
-    if (XHSREnabledDefaultNo(@"XHS_RemoveAdsAndSponsors")) { %orig(nil); return; }
-    %orig;
+    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
+    %orig(nil);
 }
 %end
 
