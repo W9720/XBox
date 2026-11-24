@@ -19,6 +19,7 @@
 #import <stdlib.h>
 #import <sys/stat.h>
 #import <unistd.h>
+#import <errno.h>
 
 #pragma mark - 反注入检测：对 App 隐藏本插件镜像
 
@@ -101,16 +102,19 @@ static XBEAccessFn XBEOrigAccess = NULL;
 
 static int XBEStatProxy(const char *path, struct stat *buf) {
     XBERecordPathProbe(path);
+    if (XBEPathLooksSuspicious(path)) { errno = ENOENT; return -1; }
     return XBEOrigStat ? XBEOrigStat(path, buf) : -1;
 }
 
 static int XBELstatProxy(const char *path, struct stat *buf) {
     XBERecordPathProbe(path);
+    if (XBEPathLooksSuspicious(path)) { errno = ENOENT; return -1; }
     return XBEOrigLstat ? XBEOrigLstat(path, buf) : -1;
 }
 
 static int XBEAccessProxy(const char *path, int mode) {
     XBERecordPathProbe(path);
+    if (XBEPathLooksSuspicious(path)) { errno = ENOENT; return -1; }
     return XBEOrigAccess ? XBEOrigAccess(path, mode) : -1;
 }
 
@@ -1149,17 +1153,38 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
 %end
 
-#pragma mark - 探测：App 是否在查越狱路径（只观察）
+#pragma mark - 越狱路径隐藏（实测 App 查询 /var/jb 下路径 174 次）
 
 %hook NSFileManager
 
 - (BOOL)fileExistsAtPath:(NSString *)path {
     XBERecordPathProbe(path.UTF8String);
+    if (XBEPathLooksSuspicious(path.UTF8String)) return NO;
     return %orig;
 }
 
 - (BOOL)fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
     XBERecordPathProbe(path.UTF8String);
+    if (XBEPathLooksSuspicious(path.UTF8String)) {
+        if (isDirectory) *isDirectory = NO;
+        return NO;
+    }
+    return %orig;
+}
+
+- (NSDictionary<NSFileAttributeKey, id> *)attributesOfItemAtPath:(NSString *)path error:(NSError **)error {
+    if (XBEPathLooksSuspicious(path.UTF8String)) {
+        if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
+        return nil;
+    }
+    return %orig;
+}
+
+- (NSArray<NSString *> *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
+    if (XBEPathLooksSuspicious(path.UTF8String)) {
+        if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
+        return nil;
+    }
     return %orig;
 }
 
