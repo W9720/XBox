@@ -37,25 +37,31 @@ jobs:
           cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
           chmod +x "$HOME/theos/bin/"*
           # Linux 下 Theos 需要 toolchain/linux/iphone/bin/*，逐项指向系统工具
-          # 关键：ld 必须指向 Mach-O 链接器 ld64.lld，不能是 GNU ld
+          # 关键：ld 必须是 Mach-O 链接器 ld64.lld，不能是 GNU ld
           TC="$HOME/theos/toolchain/linux/iphone"
           mkdir -p "$TC/bin"
+          if [ ! -e /usr/bin/ld64.lld ]; then
+            src="$(ls /usr/bin/ld64.lld-* 2>/dev/null | head -1)"
+            if [ -n "$src" ]; then sudo ln -sfn "$src" /usr/bin/ld64.lld; fi
+          fi
+          if [ ! -e /usr/bin/llvm-strip ]; then
+            src="$(ls /usr/bin/llvm-strip-* 2>/dev/null | head -1)"
+            if [ -n "$src" ]; then sudo ln -sfn "$src" /usr/bin/llvm-strip; fi
+          fi
           ln -sfn /usr/bin/clang "$TC/bin/clang"
           ln -sfn /usr/bin/clang++ "$TC/bin/clang++"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64"
           ln -sfn /usr/bin/ld64.lld "$TC/bin/ld64.lld"
-          for t in llvm-strip:strip llvm-objcopy:objcopy llvm-install-name-tool:install_name_tool; do
-            src_name="${t%%:*}"; dst_name="${t##*:}"
-            src="$(command -v "$src_name" || true)"
-            if [ -z "$src" ]; then src="$(ls /usr/bin/${src_name}-* 2>/dev/null | head -1)"; fi
-            if [ -n "$src" ]; then ln -sfn "$src" "$TC/bin/$dst_name"; fi
-          done
+          ln -sfn /usr/bin/llvm-strip "$TC/bin/strip"
+          # 让 clang 在 PATH 中优先找到 Mach-O 版 ld
+          echo "$TC/bin" >> "$GITHUB_PATH"
           ls -l "$TC/bin"
 
       - name: 环境自检
         run: |
           echo "--- clang"; clang --version | head -3
+          echo "--- ld"; command -v ld; readlink -f "$(command -v ld)" || true
           echo "--- ld64.lld"; which ld64.lld && ld64.lld --version | head -2
           echo "--- ldid"; ldid -v || true
           echo "--- dpkg-deb"; dpkg-deb --version | head -1
