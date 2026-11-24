@@ -1,0 +1,9 @@
+Package: com.xbook.enhancer
+Name: XBook Enhancer
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: 小红书 (com.xingin.discover) 功能增强 - 下载/去水印/检测绕过/去广告/Tab 隐藏/字体
+Maintainer: local
+Author: local
+Section: Tweaks
+Depends: firmware (>= 15.0), mobilesubstrate | ellekit
