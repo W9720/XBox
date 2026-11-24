@@ -3,7 +3,7 @@ ARCHS := arm64
 THEOS_PACKAGE_SCHEME = rootless
 
 TWEAK_NAME = XBookEnhancer
-XBookEnhancer_FILES = Tweak.x Menu.m
+XBookEnhancer_FILES = Tweak.x Menu.m CopyrightAnimation.m
 XBookEnhancer_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-function
 XBookEnhancer_FRAMEWORKS = UIKit Foundation Photos AVFoundation CoreServices
 

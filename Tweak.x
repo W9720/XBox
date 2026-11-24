@@ -1151,11 +1151,14 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
 #pragma mark - 初始化
 
+extern void showCopyrightAnimation(void);
+
 %ctor {
     @autoreleasepool {
         NSLog(@"[XBookEnhancer] loaded. bundle=%@ version=%@",
               [[NSBundle mainBundle] bundleIdentifier],
               [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"]);
         [XBEFloatingEntry install];
+        showCopyrightAnimation();
     }
 }

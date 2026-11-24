@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          brew install ldid xz make
+          git clone --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$HOME/theos-sdks"
+          cd "$HOME/theos-sdks"
+          git sparse-checkout set iPhoneOS16.5.sdk
+          mkdir -p "$HOME/theos/sdks"
+          cp -R "$HOME/theos-sdks/"*.sdk "$HOME/theos/sdks/"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build package
+        run: |
+          MAKE_BIN="$(command -v gmake || command -v make)"
+          echo "using $MAKE_BIN"
+          "$MAKE_BIN" clean 2>/dev/null || true
+          "$MAKE_BIN" package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: XBookEnhancer-rootless
+          path: packages/*.deb
+          if-no-files-found: error
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: XBookEnhancer-dylib
+          path: .theos/obj/**/*.dylib
+          if-no-files-found: ignore
