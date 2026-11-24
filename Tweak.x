@@ -17,6 +17,8 @@
 #import <dlfcn.h>
 #import <string.h>
 #import <stdlib.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 #pragma mark - 反注入检测：对 App 隐藏本插件镜像
 
@@ -62,6 +64,54 @@ static const char **XBECopyImageNamesProxy(unsigned int *outCount) {
     filtered[kept] = NULL;
     if (outCount) *outCount = kept;
     return filtered;
+}
+
+// 越狱路径探测（只统计，不改变返回值）
+static volatile NSUInteger gXBEPathProbeCount = 0;
+static volatile BOOL gXBEDiagSuppress = NO;
+static char gXBEPathProbeLast[512] = {0};
+
+static BOOL XBEPathLooksSuspicious(const char *path) {
+    if (!path) return NO;
+    static const char *needles[] = {
+        "/var/jb", "MobileSubstrate", "libsubstrate", "libhooker", "ellekit",
+        "Cydia", "Sileo", "cycript", "frida", "/etc/apt", "/var/lib/dpkg",
+        "/bin/bash", "/usr/sbin/sshd", "TweakInject", "DynamicLibraries"
+    };
+    for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+        if (strstr(path, needles[i])) return YES;
+    }
+    return NO;
+}
+
+static void XBERecordPathProbe(const char *path) {
+    if (gXBEDiagSuppress || !XBEPathLooksSuspicious(path)) return;
+    gXBEPathProbeCount++;
+    size_t len = strlen(path);
+    if (len > sizeof(gXBEPathProbeLast) - 1) len = sizeof(gXBEPathProbeLast) - 1;
+    memcpy(gXBEPathProbeLast, path, len);
+    gXBEPathProbeLast[len] = 0;
+}
+
+typedef int (*XBEStatFn)(const char *, struct stat *);
+typedef int (*XBEAccessFn)(const char *, int);
+static XBEStatFn XBEOrigStat = NULL;
+static XBEStatFn XBEOrigLstat = NULL;
+static XBEAccessFn XBEOrigAccess = NULL;
+
+static int XBEStatProxy(const char *path, struct stat *buf) {
+    XBERecordPathProbe(path);
+    return XBEOrigStat ? XBEOrigStat(path, buf) : -1;
+}
+
+static int XBELstatProxy(const char *path, struct stat *buf) {
+    XBERecordPathProbe(path);
+    return XBEOrigLstat ? XBEOrigLstat(path, buf) : -1;
+}
+
+static int XBEAccessProxy(const char *path, int mode) {
+    XBERecordPathProbe(path);
+    return XBEOrigAccess ? XBEOrigAccess(path, mode) : -1;
 }
 
 // 运行时探测数据（设置页“诊断”分区展示）
@@ -136,6 +186,14 @@ static void XBEInstallImageHider(void) {
     void *symObjcNames = dlsym(RTLD_DEFAULT, "objc_copyImageNames");
     if (symObjcNames) hookFn(symObjcNames, (void *)XBECopyImageNamesProxy, (void **)&XBEOrigCopyImageNames);
 
+    // 越狱路径探测（只观察，不改返回值）
+    void *symStat = dlsym(RTLD_DEFAULT, "stat");
+    void *symLstat = dlsym(RTLD_DEFAULT, "lstat");
+    void *symAccess = dlsym(RTLD_DEFAULT, "access");
+    if (symStat) hookFn(symStat, (void *)XBEStatProxy, (void **)&XBEOrigStat);
+    if (symLstat) hookFn(symLstat, (void *)XBELstatProxy, (void **)&XBEOrigLstat);
+    if (symAccess) hookFn(symAccess, (void *)XBEAccessProxy, (void **)&XBEOrigAccess);
+
     XBEHiderInstalled = YES;
     NSLog(@"[XBookEnhancer] own image hidden at dyld index %d", XBEHiddenIndex);
 }
@@ -174,10 +232,16 @@ NSArray<NSArray<NSString *> *> *XBEDiagRuntimeItems(void) {
     [items addObject:@[@"objc 列表含本插件", objcVisible ? @"是（异常）" : @"否"]];
 
     NSFileManager *fm = [NSFileManager defaultManager];
+    gXBEDiagSuppress = YES;
     [items addObject:@[@"/var/jb 存在", [fm fileExistsAtPath:@"/var/jb"] ? @"是" : @"否"]];
     BOOL substrate = [fm fileExistsAtPath:@"/var/jb/usr/lib/libsubstrate.dylib"] ||
                      [fm fileExistsAtPath:@"/usr/lib/libsubstrate.dylib"];
     [items addObject:@[@"libsubstrate 存在", substrate ? @"是" : @"否"]];
+    gXBEDiagSuppress = NO;
+
+    [items addObject:@[@"App 查越狱路径次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEPathProbeCount]]];
+    NSString *lastProbe = gXBEPathProbeLast[0] ? [NSString stringWithUTF8String:gXBEPathProbeLast] : @"无";
+    [items addObject:@[@"最后一次可疑路径", lastProbe.length ? lastProbe : @"无"]];
 
     for (NSUInteger i = 0; i < 8; i++) {
         [items addObject:@[[NSString stringWithFormat:@"%@ 被调用", kXBEDetectLabels[i]],
@@ -1081,6 +1145,22 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
                                               videoURL:videoURL
                                          preferredName:nil
                                             completion:nil];
+}
+
+%end
+
+#pragma mark - 探测：App 是否在查越狱路径（只观察）
+
+%hook NSFileManager
+
+- (BOOL)fileExistsAtPath:(NSString *)path {
+    XBERecordPathProbe(path.UTF8String);
+    return %orig;
+}
+
+- (BOOL)fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
+    XBERecordPathProbe(path.UTF8String);
+    return %orig;
 }
 
 %end
