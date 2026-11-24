@@ -654,13 +654,13 @@ didCompleteWithError:(NSError *)error {
     [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     button.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     [button addTarget:self action:@selector(handleSaveButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self addSubview:button];
+    [(UIView *)self addSubview:button];
 }
 
 %new
 - (void)handleSaveButtonTapped {
     UIImage *image = nil;
-    for (UIView *sub in self.subviews) {
+    for (UIView *sub in [(UIView *)self subviews]) {
         if ([sub isKindOfClass:[UIImageView class]] && ((UIImageView *)sub).image) {
             image = ((UIImageView *)sub).image;
             break;
@@ -738,6 +738,10 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 }
 
 // 顶层控制器（原插件 class_addMethod 注入）
+@interface UIViewController (XHSRTopLookup)
+- (UIViewController *)topViewController;
+@end
+
 %hook UIViewController
 
 %new
@@ -837,7 +841,7 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
     NSArray *videos = nil;
     @try {
-        id comment = [self valueForKey:@"currentComment"];
+        id comment = [(NSObject *)self valueForKey:@"currentComment"];
         videos = XHSRSafeValue(comment, @"commentVideos");
     } @catch (__unused NSException *e) {}
     if (index < 0 || index >= (NSInteger)videos.count) { %orig; return; }
@@ -867,7 +871,7 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 - (void)layoutSubviews {
     %orig;
     if (!XHSREnabledDefaultNo(@"XHS_EnableCommentsVoiceDownload")) return;
-    XHSRAttachInlineSaveButton(self, self, @selector(xbe_downloadVoiceTapped:));
+    XHSRAttachInlineSaveButton((UIView *)self, self, @selector(xbe_downloadVoiceTapped:));
 }
 
 - (void)xbe_downloadVoiceTapped:(UIButton *)sender {
@@ -888,13 +892,15 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf.superview) return;
-        XHSRAttachInlineSaveButton(strongSelf.superview, strongSelf, @selector(xbe_saveEmojiTapped:));
+        if (!strongSelf) return;
+        UIView *host = ((UIView *)strongSelf).superview;
+        if (!host) return;
+        XHSRAttachInlineSaveButton(host, strongSelf, @selector(xbe_saveEmojiTapped:));
     });
 }
 
 - (void)xbe_saveEmojiTapped:(UIButton *)sender {
-    UIImage *image = XHSRImageInHierarchy(self.superview, 0);
+    UIImage *image = XHSRImageInHierarchy(((UIView *)self).superview, 0);
     if (!image) return;
     [XBookEnhancerDownloader saveImage:image preferredName:nil completion:nil];
 }
@@ -1053,6 +1059,12 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
 // 底部 Tab 隐藏：逻辑来自 sub_22C7C8（XYTabBar layoutSubviews 实现）
 // key 与匹配串均由运行时解密确证
+@interface XYTabBar (XHSRHelpers)
+- (void)xhsr_applyTabRemoval;
+- (void)xhsr_clearBadgesIfNeeded;
+- (void)xhsr_hideBadgeInView:(UIView *)view depth:(NSInteger)depth;
+@end
+
 %hook XYTabBar
 
 %new
@@ -1087,7 +1099,7 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
     CGFloat count = (CGFloat)visible.count;
     if (count <= 0) return;
-    UIView *bar = [self isKindOfClass:[UIView class]] ? (UIView *)self : nil;
+    UIView *bar = [(NSObject *)self isKindOfClass:[UIView class]] ? (UIView *)self : nil;
     if (!bar) return;
     CGFloat w = bar.bounds.size.width / count;
     CGFloat h = bar.bounds.size.height;
