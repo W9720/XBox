@@ -81,7 +81,7 @@ jobs:
           SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
           printf 'int xbe_probe(void){return 0;}\n' > /tmp/probe.c
           clang -target arm64-apple-ios15.0 -isysroot "$SDK" -c /tmp/probe.c -o /tmp/probe.o
-          ld -arch arm64 -dylib -iphoneos_version_min 15.0 -syslibroot "$SDK" \
+          ld -arch arm64 -dylib -platform_version ios 15.0 16.5 -syslibroot "$SDK" \
              -o /tmp/probe.dylib /tmp/probe.o -L"$SDK/usr/lib" -lSystem
           file /tmp/probe.dylib
           echo "链接器冒烟测试通过"
