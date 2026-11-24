@@ -36,6 +36,9 @@ jobs:
           mkdir -p "$HOME/theos/sdks"
           cp -R "$HOME/sdks-src/"*.sdk "$HOME/theos/sdks/"
           chmod +x "$HOME/theos/bin/"*
+          # Linux 下 Theos 需要 toolchain/linux/iphone/bin/clang，软链系统工具链
+          mkdir -p "$HOME/theos/toolchain/linux"
+          ln -sfn /usr "$HOME/theos/toolchain/linux/iphone"
 
       - name: 环境自检
         run: |
