@@ -13,6 +13,87 @@
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <mach-o/dyld.h>
+#import <dlfcn.h>
+#import <string.h>
+
+#pragma mark - 反注入检测：对 App 隐藏本插件镜像
+
+// 实测：原插件与复刻插件在同一台设备/同一版本 App 上都会被判为“版本过低/无网络”，
+// 说明触发点是“运行时有第三方 dylib 被加载”，而不是某个具体 Hook。
+// 这里把本插件从 dyld 镜像枚举中摘掉（真实符号，内联 Hook，不依赖 symbol rebinding）。
+
+typedef uint32_t (*XBEImageCountFn)(void);
+typedef const char *(*XBEImageNameFn)(uint32_t);
+typedef const struct mach_header *(*XBEImageHeaderFn)(uint32_t);
+typedef intptr_t (*XBEImageSlideFn)(uint32_t);
+typedef void (*XBEHookFunctionFn)(void *symbol, void *replace, void **result);
+
+static XBEImageCountFn XBEOrigCount = NULL;
+static XBEImageNameFn XBEOrigName = NULL;
+static XBEImageHeaderFn XBEOrigHeader = NULL;
+static XBEImageSlideFn XBEOrigSlide = NULL;
+static int XBEHiddenIndex = -1;
+static BOOL XBEHiderInstalled = NO;
+
+static uint32_t XBEMappedImageIndex(uint32_t index) {
+    if (XBEHiddenIndex < 0) return index;
+    return (index >= (uint32_t)XBEHiddenIndex) ? index + 1 : index;
+}
+
+static uint32_t XBEImageCountProxy(void) {
+    uint32_t count = XBEOrigCount ? XBEOrigCount() : 0;
+    return (XBEHiddenIndex >= 0 && count > 0) ? count - 1 : count;
+}
+
+static const char *XBEImageNameProxy(uint32_t index) {
+    return XBEOrigName ? XBEOrigName(XBEMappedImageIndex(index)) : NULL;
+}
+
+static const struct mach_header *XBEImageHeaderProxy(uint32_t index) {
+    return XBEOrigHeader ? XBEOrigHeader(XBEMappedImageIndex(index)) : NULL;
+}
+
+static intptr_t XBEImageSlideProxy(uint32_t index) {
+    return XBEOrigSlide ? XBEOrigSlide(XBEMappedImageIndex(index)) : 0;
+}
+
+static void XBEInstallImageHider(void) {
+    if (XBEHiderInstalled) return;
+
+    void *symCount = dlsym(RTLD_DEFAULT, "_dyld_image_count");
+    void *symName = dlsym(RTLD_DEFAULT, "_dyld_get_image_name");
+    void *symHeader = dlsym(RTLD_DEFAULT, "_dyld_get_image_header");
+    void *symSlide = dlsym(RTLD_DEFAULT, "_dyld_get_image_vmaddr_slide");
+    XBEHookFunctionFn hookFn = (XBEHookFunctionFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!hookFn || !symCount || !symName) {
+        NSLog(@"[XBookEnhancer] image hider unavailable (hook=%p count=%p name=%p)", hookFn, symCount, symName);
+        return;
+    }
+
+    // 先定位自己的镜像下标（此时还未 Hook）
+    uint32_t total = ((XBEImageCountFn)symCount)();
+    for (uint32_t i = 0; i < total; i++) {
+        const char *path = ((XBEImageNameFn)symName)(i);
+        if (!path) continue;
+        if (strstr(path, "XBookEnhancer") || strstr(path, "XHS.J")) {
+            XBEHiddenIndex = (int)i;
+            break;
+        }
+    }
+    if (XBEHiddenIndex < 0) {
+        NSLog(@"[XBookEnhancer] own image not found, skip hiding");
+        return;
+    }
+
+    hookFn(symCount, (void *)XBEImageCountProxy, (void **)&XBEOrigCount);
+    hookFn(symName, (void *)XBEImageNameProxy, (void **)&XBEOrigName);
+    if (symHeader) hookFn(symHeader, (void *)XBEImageHeaderProxy, (void **)&XBEOrigHeader);
+    if (symSlide) hookFn(symSlide, (void *)XBEImageSlideProxy, (void **)&XBEOrigSlide);
+
+    XBEHiderInstalled = YES;
+    NSLog(@"[XBookEnhancer] own image hidden at dyld index %d", XBEHiddenIndex);
+}
 
 #pragma mark - 通用工具
 
@@ -1206,6 +1287,7 @@ extern void showCopyrightAnimation(void);
 
 %ctor {
     @autoreleasepool {
+        XBEInstallImageHider();
         NSLog(@"[XBookEnhancer] loaded. bundle=%@ version=%@",
               [[NSBundle mainBundle] bundleIdentifier],
               [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"]);
