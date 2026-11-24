@@ -8,8 +8,9 @@ XBookEnhancer_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-funct
 XBookEnhancer_FRAMEWORKS = UIKit Foundation Photos AVFoundation CoreServices
 
 # Linux 上的 ld64.lld 不实现 -iphoneos_version_min，必须显式给出 platform_version
+# 注意：链接由 clang 驱动，所以要用 -Wl, 形式转发给底层 ld64.lld
 ifeq ($(shell uname -s),Linux)
-XBookEnhancer_LDFLAGS += -platform_version ios 15.0 16.5
+XBookEnhancer_LDFLAGS += -Wl,-platform_version,ios,15.0,16.5
 endif
 
 include $(THEOS)/makefiles/common.mk
