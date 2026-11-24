@@ -1059,7 +1059,7 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
 // 底部 Tab 隐藏：逻辑来自 sub_22C7C8（XYTabBar layoutSubviews 实现）
 // key 与匹配串均由运行时解密确证
-@interface XYTabBar (XHSRHelpers)
+@interface XYTabBar : UIView
 - (void)xhsr_applyTabRemoval;
 - (void)xhsr_clearBadgesIfNeeded;
 - (void)xhsr_hideBadgeInView:(UIView *)view depth:(NSInteger)depth;
