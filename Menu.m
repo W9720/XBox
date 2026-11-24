@@ -64,6 +64,8 @@ static NSArray<NSArray<XBEKeyRow *> *> *XBESectionRows(void) {
 + (void)install;
 + (void)setHidden:(BOOL)hidden;
 + (void)openMenu;
++ (UIWindow *)hostWindow;
++ (void)attachIfNeeded;
 + (void)handleTwoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 + (void)handlePan:(UIPanGestureRecognizer *)pan;
 @end
@@ -144,26 +146,59 @@ static NSArray<NSArray<XBEKeyRow *> *> *XBESectionRows(void) {
 
 @end
 
-static UIWindow *gEntryWindow;
 static UIButton *gEntryButton;
+static BOOL gEntryInstalled;
 
 @implementation XBEFloatingEntry
 
+// iOS 15 上新建的 UIWindow 若没有绑定 windowScene 不会显示，
+// 因此这里直接复用 App 当前的前台窗口（与版权动画同一套做法）。
++ (UIWindow *)hostWindow {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in app.connectedScenes) {
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.isKeyWindow) return w;
+            }
+        }
+        for (UIScene *scene in app.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (!w.hidden) return w;
+            }
+        }
+    }
+    return app.windows.firstObject;
+}
+
 + (void)install {
-    if (gEntryWindow) return;
+    if (gEntryInstalled) return;
+    gEntryInstalled = YES;
+
+    // 前后台切换/窗口重建后，保证按钮仍然挂在当前窗口上
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        [self attachIfNeeded];
+    }];
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-        id stored = [d objectForKey:kXBEShowEntryKey];
-        BOOL show = stored ? [d boolForKey:kXBEShowEntryKey] : YES;
-        if (!show) return;
+        [self attachIfNeeded];
+    });
+}
 
-        UIWindow *window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        window.windowLevel = UIWindowLevelAlert + 5;
-        window.backgroundColor = [UIColor clearColor];
-        UIViewController *root = [UIViewController new];
-        root.view.backgroundColor = [UIColor clearColor];
-        window.rootViewController = root;
++ (void)attachIfNeeded {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    id stored = [d objectForKey:kXBEShowEntryKey];
+    BOOL show = stored ? [d boolForKey:kXBEShowEntryKey] : YES;
 
+    UIWindow *window = gEntryButton.window ?: [self hostWindow];
+    if (!window) return;
+
+    if (!gEntryButton) {
         UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
         button.frame = CGRectMake(0, 0, 46, 46);
         button.layer.cornerRadius = 23;
@@ -182,29 +217,35 @@ static UIButton *gEntryButton;
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [button addGestureRecognizer:pan];
 
-        CGFloat savedX = [d doubleForKey:@"XHSR_EntryX"];
-        CGFloat savedY = [d doubleForKey:@"XHSR_EntryY"];
-        CGRect screen = [UIScreen mainScreen].bounds;
-        if (savedX <= 0 && savedY <= 0) {
+        gEntryButton = button;
+    }
+
+    if (!gEntryButton.superview) {
+        CGRect screen = window.bounds;
+        CGFloat savedX, savedY;
+        if ([d objectForKey:@"XHSR_EntryX"] && [d objectForKey:@"XHSR_EntryY"]) {
+            savedX = [d doubleForKey:@"XHSR_EntryX"];
+            savedY = [d doubleForKey:@"XHSR_EntryY"];
+        } else {
             savedX = screen.size.width - 58.0;
             savedY = screen.size.height * 0.62;
         }
-        button.center = CGPointMake(savedX, savedY);
+        gEntryButton.center = CGPointMake(savedX, savedY);
+        [window addSubview:gEntryButton];
+    }
 
-        [root.view addSubview:button];
-        window.hidden = NO;
-        gEntryWindow = window;
-        gEntryButton = button;
-    });
+    gEntryButton.hidden = !show;
 }
 
 + (void)setHidden:(BOOL)hidden {
-    gEntryWindow.hidden = hidden;
+    gEntryButton.hidden = hidden;
 }
 
 + (void)openMenu {
-    UIViewController *top = [UIApplication sharedApplication].keyWindow.rootViewController;
+    UIWindow *window = gEntryButton.window ?: [self hostWindow];
+    UIViewController *top = window.rootViewController;
     while (top.presentedViewController) top = top.presentedViewController;
+    if (!top) return;
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[XBEMenuViewController new]];
     nav.modalPresentationStyle = UIModalPresentationPageSheet;
     [top presentViewController:nav animated:YES completion:nil];
