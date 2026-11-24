@@ -13,246 +13,6 @@
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
-#import <mach-o/dyld.h>
-#import <dlfcn.h>
-#import <string.h>
-#import <stdlib.h>
-#import <sys/stat.h>
-#import <unistd.h>
-#import <errno.h>
-
-#pragma mark - 反注入检测：对 App 隐藏本插件镜像
-
-// 实测：原插件与复刻插件在同一台设备/同一版本 App 上都会被判为“版本过低/无网络”，
-// 说明触发点是“运行时有第三方 dylib 被加载”，而不是某个具体 Hook。
-// 这里把本插件从 dyld 镜像枚举中摘掉（真实符号，内联 Hook，不依赖 symbol rebinding）。
-
-typedef uint32_t (*XBEImageCountFn)(void);
-typedef const char *(*XBEImageNameFn)(uint32_t);
-typedef const struct mach_header *(*XBEImageHeaderFn)(uint32_t);
-typedef intptr_t (*XBEImageSlideFn)(uint32_t);
-typedef void (*XBEHookFunctionFn)(void *symbol, void *replace, void **result);
-
-static XBEImageCountFn XBEOrigCount = NULL;
-static XBEImageNameFn XBEOrigName = NULL;
-static XBEImageHeaderFn XBEOrigHeader = NULL;
-static XBEImageSlideFn XBEOrigSlide = NULL;
-static int XBEHiddenIndex = -1;
-static BOOL XBEHiderInstalled = NO;
-
-// objc_copyImageNames 拦截（App 实测走这条路能看到本插件）
-typedef const char **(*XBECopyImageNamesFn)(unsigned int *);
-static XBECopyImageNamesFn XBEOrigCopyImageNames = NULL;
-static volatile NSUInteger gXBEObjcScanCount = 0;
-
-static const char **XBECopyImageNamesProxy(unsigned int *outCount) {
-    gXBEObjcScanCount++;
-    unsigned int total = 0;
-    const char **original = XBEOrigCopyImageNames ? XBEOrigCopyImageNames(&total) : NULL;
-    if (!original) {
-        if (outCount) *outCount = 0;
-        return NULL;
-    }
-    // 返回全新分配的数组/字符串，符合 objc_copyImageNames 的调用方释放契约，同时过滤自身
-    const char **filtered = (const char **)calloc((size_t)total + 1, sizeof(char *));
-    unsigned int kept = 0;
-    for (unsigned int i = 0; i < total; i++) {
-        const char *path = original[i];
-        if (!path) continue;
-        if (strstr(path, "XBookEnhancer") || strstr(path, "XHS.J")) continue;
-        filtered[kept++] = strdup(path);
-    }
-    filtered[kept] = NULL;
-    if (outCount) *outCount = kept;
-    return filtered;
-}
-
-// 越狱路径探测（只统计，不改变返回值）
-static volatile NSUInteger gXBEPathProbeCount = 0;
-static volatile BOOL gXBEDiagSuppress = NO;
-static char gXBEPathProbeLast[512] = {0};
-
-static BOOL XBEPathLooksSuspicious(const char *path) {
-    if (!path) return NO;
-    static const char *needles[] = {
-        "/var/jb", "MobileSubstrate", "libsubstrate", "libhooker", "ellekit",
-        "Cydia", "Sileo", "cycript", "frida", "/etc/apt", "/var/lib/dpkg",
-        "/bin/bash", "/usr/sbin/sshd", "TweakInject", "DynamicLibraries"
-    };
-    for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
-        if (strstr(path, needles[i])) return YES;
-    }
-    return NO;
-}
-
-static void XBERecordPathProbe(const char *path) {
-    if (gXBEDiagSuppress || !XBEPathLooksSuspicious(path)) return;
-    gXBEPathProbeCount++;
-    size_t len = strlen(path);
-    if (len > sizeof(gXBEPathProbeLast) - 1) len = sizeof(gXBEPathProbeLast) - 1;
-    memcpy(gXBEPathProbeLast, path, len);
-    gXBEPathProbeLast[len] = 0;
-}
-
-typedef int (*XBEStatFn)(const char *, struct stat *);
-typedef int (*XBEAccessFn)(const char *, int);
-static XBEStatFn XBEOrigStat = NULL;
-static XBEStatFn XBEOrigLstat = NULL;
-static XBEAccessFn XBEOrigAccess = NULL;
-
-static int XBEStatProxy(const char *path, struct stat *buf) {
-    XBERecordPathProbe(path);
-    if (XBEPathLooksSuspicious(path)) { errno = ENOENT; return -1; }
-    return XBEOrigStat ? XBEOrigStat(path, buf) : -1;
-}
-
-static int XBELstatProxy(const char *path, struct stat *buf) {
-    XBERecordPathProbe(path);
-    if (XBEPathLooksSuspicious(path)) { errno = ENOENT; return -1; }
-    return XBEOrigLstat ? XBEOrigLstat(path, buf) : -1;
-}
-
-static int XBEAccessProxy(const char *path, int mode) {
-    XBERecordPathProbe(path);
-    if (XBEPathLooksSuspicious(path)) { errno = ENOENT; return -1; }
-    return XBEOrigAccess ? XBEOrigAccess(path, mode) : -1;
-}
-
-// 运行时探测数据（设置页“诊断”分区展示）
-static volatile NSUInteger gXBEDyldScanCount = 0;
-static volatile NSUInteger gXBEDetectCalls[8] = {0};
-static NSString *const kXBEDetectLabels[8] = {
-    @"MOBFDevice.hasJailBroken",
-    @"XYDevice.isJailbroken",
-    @"XYDevice.onceJailbroken",
-    @"XYFoundationTools.jailBreaked",
-    @"XYFoundationTools.isRooted",
-    @"XYFoundationTools.isBeingDebug",
-    @"KeychainStore.readJailBreakFile",
-    @"SVCMSecverify.setIs_jail",
-};
-
-static uint32_t XBEMappedImageIndex(uint32_t index) {
-    if (XBEHiddenIndex < 0) return index;
-    return (index >= (uint32_t)XBEHiddenIndex) ? index + 1 : index;
-}
-
-static uint32_t XBEImageCountProxy(void) {
-    gXBEDyldScanCount++;
-    uint32_t count = XBEOrigCount ? XBEOrigCount() : 0;
-    return (XBEHiddenIndex >= 0 && count > 0) ? count - 1 : count;
-}
-
-static const char *XBEImageNameProxy(uint32_t index) {
-    return XBEOrigName ? XBEOrigName(XBEMappedImageIndex(index)) : NULL;
-}
-
-static const struct mach_header *XBEImageHeaderProxy(uint32_t index) {
-    return XBEOrigHeader ? XBEOrigHeader(XBEMappedImageIndex(index)) : NULL;
-}
-
-static intptr_t XBEImageSlideProxy(uint32_t index) {
-    return XBEOrigSlide ? XBEOrigSlide(XBEMappedImageIndex(index)) : 0;
-}
-
-static void XBEInstallImageHider(void) {
-    if (XBEHiderInstalled) return;
-
-    void *symCount = dlsym(RTLD_DEFAULT, "_dyld_image_count");
-    void *symName = dlsym(RTLD_DEFAULT, "_dyld_get_image_name");
-    void *symHeader = dlsym(RTLD_DEFAULT, "_dyld_get_image_header");
-    void *symSlide = dlsym(RTLD_DEFAULT, "_dyld_get_image_vmaddr_slide");
-    XBEHookFunctionFn hookFn = (XBEHookFunctionFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (!hookFn || !symCount || !symName) {
-        NSLog(@"[XBookEnhancer] image hider unavailable (hook=%p count=%p name=%p)", hookFn, symCount, symName);
-        return;
-    }
-
-    // 先定位自己的镜像下标（此时还未 Hook）
-    uint32_t total = ((XBEImageCountFn)symCount)();
-    for (uint32_t i = 0; i < total; i++) {
-        const char *path = ((XBEImageNameFn)symName)(i);
-        if (!path) continue;
-        if (strstr(path, "XBookEnhancer") || strstr(path, "XHS.J")) {
-            XBEHiddenIndex = (int)i;
-            break;
-        }
-    }
-    if (XBEHiddenIndex < 0) {
-        NSLog(@"[XBookEnhancer] own image not found, skip hiding");
-        return;
-    }
-
-    hookFn(symCount, (void *)XBEImageCountProxy, (void **)&XBEOrigCount);
-    hookFn(symName, (void *)XBEImageNameProxy, (void **)&XBEOrigName);
-    if (symHeader) hookFn(symHeader, (void *)XBEImageHeaderProxy, (void **)&XBEOrigHeader);
-    if (symSlide) hookFn(symSlide, (void *)XBEImageSlideProxy, (void **)&XBEOrigSlide);
-    void *symObjcNames = dlsym(RTLD_DEFAULT, "objc_copyImageNames");
-    if (symObjcNames) hookFn(symObjcNames, (void *)XBECopyImageNamesProxy, (void **)&XBEOrigCopyImageNames);
-
-    // 越狱路径探测（只观察，不改返回值）
-    void *symStat = dlsym(RTLD_DEFAULT, "stat");
-    void *symLstat = dlsym(RTLD_DEFAULT, "lstat");
-    void *symAccess = dlsym(RTLD_DEFAULT, "access");
-    if (symStat) hookFn(symStat, (void *)XBEStatProxy, (void **)&XBEOrigStat);
-    if (symLstat) hookFn(symLstat, (void *)XBELstatProxy, (void **)&XBEOrigLstat);
-    if (symAccess) hookFn(symAccess, (void *)XBEAccessProxy, (void **)&XBEOrigAccess);
-
-    XBEHiderInstalled = YES;
-    NSLog(@"[XBookEnhancer] own image hidden at dyld index %d", XBEHiddenIndex);
-}
-
-#pragma mark - 运行时探测（设置页“诊断”分区使用）
-
-NSArray<NSArray<NSString *> *> *XBEDiagRuntimeItems(void) {
-    NSMutableArray *items = [NSMutableArray array];
-
-    void *hookFn = dlsym(RTLD_DEFAULT, "MSHookFunction");
-    [items addObject:@[@"MSHookFunction", hookFn ? @"可用" : @"不可用"]];
-    [items addObject:@[@"镜像隐藏", XBEHiderInstalled ? @"已生效" : @"未生效"]];
-
-    uint32_t realCount = XBEOrigCount ? XBEOrigCount() : _dyld_image_count();
-    uint32_t appCount = _dyld_image_count();
-    [items addObject:@[@"dyld 真实镜像数", [NSString stringWithFormat:@"%u", realCount]]];
-    [items addObject:@[@"App 可见镜像数", [NSString stringWithFormat:@"%u", appCount]]];
-    [items addObject:@[@"App 枚举 dyld 次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEDyldScanCount]]];
-    [items addObject:@[@"App 枚举 objc 次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEObjcScanCount]]];
-
-    BOOL dyldVisible = NO;
-    for (uint32_t i = 0; i < appCount; i++) {
-        const char *path = _dyld_get_image_name(i);
-        if (path && strstr(path, "XBookEnhancer")) { dyldVisible = YES; break; }
-    }
-    [items addObject:@[@"dyld 列表含本插件", dyldVisible ? @"是（异常）" : @"否"]];
-
-    unsigned int objcCount = 0;
-    const char **objcNames = objc_copyImageNames(&objcCount);
-    BOOL objcVisible = NO;
-    if (objcNames) {
-        for (unsigned int i = 0; i < objcCount; i++) {
-            if (objcNames[i] && strstr(objcNames[i], "XBookEnhancer")) { objcVisible = YES; break; }
-        }
-    }
-    [items addObject:@[@"objc 列表含本插件", objcVisible ? @"是（异常）" : @"否"]];
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    gXBEDiagSuppress = YES;
-    [items addObject:@[@"/var/jb 存在", [fm fileExistsAtPath:@"/var/jb"] ? @"是" : @"否"]];
-    BOOL substrate = [fm fileExistsAtPath:@"/var/jb/usr/lib/libsubstrate.dylib"] ||
-                     [fm fileExistsAtPath:@"/usr/lib/libsubstrate.dylib"];
-    [items addObject:@[@"libsubstrate 存在", substrate ? @"是" : @"否"]];
-    gXBEDiagSuppress = NO;
-
-    [items addObject:@[@"App 查越狱路径次数", [NSString stringWithFormat:@"%lu", (unsigned long)gXBEPathProbeCount]]];
-    NSString *lastProbe = gXBEPathProbeLast[0] ? [NSString stringWithUTF8String:gXBEPathProbeLast] : @"无";
-    [items addObject:@[@"最后一次可疑路径", lastProbe.length ? lastProbe : @"无"]];
-
-    for (NSUInteger i = 0; i < 8; i++) {
-        [items addObject:@[[NSString stringWithFormat:@"%@ 被调用", kXBEDetectLabels[i]],
-                           [NSString stringWithFormat:@"%lu", (unsigned long)gXBEDetectCalls[i]]]];
-    }
-    return items;
-}
 
 #pragma mark - 通用工具
 
@@ -319,11 +79,6 @@ static BOOL XHSREnabledDefaultNo(NSString *key) {
     id v = [d objectForKey:key];
     if (!v) return NO;
     return [d boolForKey:key];
-}
-
-// 广告/开屏清理：会改动 App 自身的模型装配，必须严格受开关控制
-static BOOL XHSRAdsRemovalEnabled(void) {
-    return XHSREnabledDefaultNo(@"XHS_RemoveAdsAndSponsors");
 }
 
 // 自动命名时间戳（对应 XHS_AutomaticFileNaming）
@@ -982,7 +737,29 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
     background.image = image;
 }
 
+// 顶层控制器（原插件 class_addMethod 注入）
+@interface UIViewController (XHSRTopLookup)
+- (UIViewController *)topViewController;
+@end
+
 %hook UIViewController
+
+%new
+- (UIViewController *)topViewController {
+    UIViewController *vc = self;
+    while (vc.presentedViewController) {
+        vc = vc.presentedViewController;
+    }
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        UIViewController *top = ((UINavigationController *)vc).topViewController;
+        return top ? [top topViewController] : vc;
+    }
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        UIViewController *sel = ((UITabBarController *)vc).selectedViewController;
+        return sel ? [sel topViewController] : vc;
+    }
+    return vc;
+}
 
 // 对应原插件 Hook 95：viewDidAppear 后按字体功能应用自定义字体
 - (void)viewDidAppear:(BOOL)animated {
@@ -1153,204 +930,111 @@ static void XHSRApplyChatBackground(UIViewController *vc) {
 
 %end
 
-#pragma mark - 越狱路径隐藏（实测 App 查询 /var/jb 下路径 174 次）
-
-%hook NSFileManager
-
-- (BOOL)fileExistsAtPath:(NSString *)path {
-    XBERecordPathProbe(path.UTF8String);
-    if (XBEPathLooksSuspicious(path.UTF8String)) return NO;
-    return %orig;
-}
-
-- (BOOL)fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
-    XBERecordPathProbe(path.UTF8String);
-    if (XBEPathLooksSuspicious(path.UTF8String)) {
-        if (isDirectory) *isDirectory = NO;
-        return NO;
-    }
-    return %orig;
-}
-
-- (NSDictionary<NSFileAttributeKey, id> *)attributesOfItemAtPath:(NSString *)path error:(NSError **)error {
-    if (XBEPathLooksSuspicious(path.UTF8String)) {
-        if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
-        return nil;
-    }
-    return %orig;
-}
-
-- (NSArray<NSString *> *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
-    if (XBEPathLooksSuspicious(path.UTF8String)) {
-        if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
-        return nil;
-    }
-    return %orig;
-}
-
-%end
-
 #pragma mark - 模块三：越狱 / 调试检测绕过
 
 %hook MOBFDevice
-+ (BOOL)hasJailBroken { gXBEDetectCalls[0]++; return NO; }
++ (BOOL)hasJailBroken { return NO; }
 %end
 
 %hook XYFoundationTools
-+ (BOOL)jailBreaked { gXBEDetectCalls[3]++; return NO; }
++ (BOOL)jailBreaked { return NO; }
 + (BOOL)onceJailbroken { return NO; }
-+ (BOOL)isRooted { gXBEDetectCalls[4]++; return NO; }
-+ (BOOL)isBeingDebug { gXBEDetectCalls[5]++; return NO; }
++ (BOOL)isRooted { return NO; }
++ (BOOL)isBeingDebug { return NO; }
 + (BOOL)canOpenWithPath:(id)path { return NO; }
 %end
 
 %hook XYDevice
-+ (BOOL)onceJailbroken { gXBEDetectCalls[2]++; return NO; }
-+ (BOOL)isJailbroken { gXBEDetectCalls[1]++; return NO; }
++ (BOOL)onceJailbroken { return NO; }
++ (BOOL)isJailbroken { return NO; }
 %end
 
 %hook KeychainStore
-- (id)readJailBreakFile { gXBEDetectCalls[6]++; return nil; }
+- (id)readJailBreakFile { return nil; }
 - (BOOL)writejailBreakFile:(id)value { return YES; }
 - (BOOL)setLock:(BOOL)lock { return YES; }
 %end
 
 %hook SVCMSecverifyLogModel
-- (void)setIs_jail:(BOOL)value { gXBEDetectCalls[7]++; %orig(NO); }
+- (void)setIs_jail:(BOOL)value { %orig(NO); }
 %end
 
-#pragma mark - 模块四：广告 / 开屏清理（全部受 XHS_RemoveAdsAndSponsors 控制）
+#pragma mark - 模块四：广告 / 开屏清理
 
 %hook XYFFNoteAdsCellController
-- (void)setAdsCell:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAdsCell:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashTrackHelper_CPT
-- (void)setAds:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAds:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAPMTracker
-- (void)setAdsID:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAdsID:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAdsResourceTask
-- (void)setAds:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAds:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAdsInfo
-- (void)setAds:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAds:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAdsConfig
-- (void)setAdsGroups:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAdsGroups:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAdsGroupInfo_CPT
-- (void)setAds:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAds:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAdsConfig_CPT
-- (void)setAdsGroups:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
+- (void)setAdsGroups:(id)value { %orig(nil); }
 %end
 
 %hook XYPHSplashAdsOpenAppView
-- (void)createSubviews {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-}
+- (void)createSubviews {}
 %end
 
 %hook XYPHVideoContentAdManager
-- (void)setAdsModel:(id)value {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
-}
-- (id)initWithAdvertisementModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (void)setAdsModel:(id)value { %orig(nil); }
+- (id)initWithAdvertisementModel:(id)model { return nil; }
 %end
 
 %hook XYVFAdvertisementViewModel
-- (id)initWithContentModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithContentModel:(id)model { return nil; }
 %end
 
 %hook XYFeedAdsLandingPagelnfo
-- (id)initWithNativeModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithNativeModel:(id)model { return nil; }
 %end
 
 %hook XYFeedAdsLandingSinglePage
-- (id)initWithNativeModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithNativeModel:(id)model { return nil; }
 %end
 
 %hook XYFeedAdsCellViewModel
-- (id)initWithNativeModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithNativeModel:(id)model { return nil; }
 %end
 
 %hook XYFeedAdsCellButtonInfo
-- (id)initWithNativeModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithNativeModel:(id)model { return nil; }
 %end
 
 %hook XYFeedAdsCellVideolnfo
-- (id)initWithNativeModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithNativeModel:(id)model { return nil; }
 %end
 
 %hook XYFeedAdsCelllmagelnfo
-- (id)initWithNativeModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return nil;
-}
+- (id)initWithNativeModel:(id)model { return nil; }
 %end
 
 %hook XYIndepHomeFeedDataSource
-- (BOOL)handleCharacteristicSplashAd {
-    if (!XHSRAdsRemovalEnabled()) return %orig;
-    return NO;
-}
+- (BOOL)handleCharacteristicSplashAd { return XHSREnabledDefaultNo(@"XHS_RemoveAdsAndSponsors") ? NO : %orig; }
 - (void)setSplashModel:(id)model {
-    if (!XHSRAdsRemovalEnabled()) { %orig; return; }
-    %orig(nil);
+    if (XHSREnabledDefaultNo(@"XHS_RemoveAdsAndSponsors")) { %orig(nil); return; }
+    %orig;
 }
 %end
 
@@ -1483,7 +1167,6 @@ extern void showCopyrightAnimation(void);
 
 %ctor {
     @autoreleasepool {
-        XBEInstallImageHider();
         NSLog(@"[XBookEnhancer] loaded. bundle=%@ version=%@",
               [[NSBundle mainBundle] bundleIdentifier],
               [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"]);

@@ -1,8 +1,4 @@
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
-
-// 实现位于 Tweak.x：运行时探测数据
-extern NSArray<NSArray<NSString *> *> *XBEDiagRuntimeItems(void);
 
 // 设置面板：对应原插件 X_MenuViewController 的四个分类
 // 所有开关直接使用逆向确证的真实键；未实现行为的开关仅存储值，不影响现有逻辑。
@@ -45,7 +41,7 @@ static NSArray<NSArray<XBEKeyRow *> *> *XBESectionRows(void) {
                 [XBEKeyRow row:@"评论区表情下载" key:@"XHS_EnableCommentsEmojiDownload" on:NO],
             ],
             @[
-                [XBEKeyRow row:@"移除板块赞助·广告" key:@"XHS_RemoveAdsAndSponsors" on:NO],
+                [XBEKeyRow row:@"移除板块赞助·广告" key:@"XHS_RemoveAdsAndSponsors" on:YES],
                 [XBEKeyRow row:@"移除底栏热门板块" key:@"XHS_RemoveBottomTabHot" on:NO],
                 [XBEKeyRow row:@"移除底栏购物板块" key:@"XHS_RemoveBottomTabShop" on:NO],
                 [XBEKeyRow row:@"移除底栏消息板块" key:@"XHS_RemoveBottomTabMessage" on:NO],
@@ -62,33 +58,6 @@ static NSArray<NSArray<XBEKeyRow *> *> *XBESectionRows(void) {
         ];
     });
     return sections;
-}
-
-static NSArray<NSString *> *XBEDiagnosticClassNames(void) {
-    return @[@"MOBFDevice", @"XYDevice", @"XYFoundationTools", @"KeychainStore",
-             @"SVCMSecverifyLogModel", @"XYTabBar", @"XYPHMediaSaveConfig",
-             @"XYPBPhotoBrowser", @"XYImageCommentManager"];
-}
-
-static NSArray<NSArray<NSString *> *> *XBEDiagnostics(void) {
-    NSMutableArray *items = [NSMutableArray array];
-    NSBundle *b = [NSBundle mainBundle];
-    NSString *ver = [b objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
-    NSString *build = [b objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
-    [items addObject:@[@"App 版本", [NSString stringWithFormat:@"%@ (%@)", ver, build]]];
-    [items addObject:@[@"Bundle ID", [b bundleIdentifier] ?: @"?"]];
-    for (NSString *name in XBEDiagnosticClassNames()) {
-        BOOL found = objc_getClass(name.UTF8String) != NULL;
-        [items addObject:@[name, found ? @"存在" : @"缺失"]];
-    }
-    NSArray<NSArray<NSString *> *> *runtime = XBEDiagRuntimeItems();
-    if (runtime.count) [items addObjectsFromArray:runtime];
-    return items;
-}
-
-static BOOL XBEDiagValueIsBad(NSString *value) {
-    return [value isEqualToString:@"缺失"] || [value containsString:@"异常"] ||
-           [value containsString:@"未生效"] || [value containsString:@"不可用"];
 }
 
 @interface XBEFloatingEntry : NSObject
@@ -122,47 +91,23 @@ static BOOL XBEDiagValueIsBad(NSString *value) {
                                                       action:@selector(close)];
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self.tableView reloadData];
-}
-
 - (void)close {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return XBESectionRows().count + 1;
+    return XBESectionRows().count;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (section >= (NSInteger)XBESectionRows().count) return @"诊断（类是否被 App 加载）";
     return XBESectionTitles()[section];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section >= (NSInteger)XBESectionRows().count) return XBEDiagnostics().count;
     return XBESectionRows()[section].count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section >= (NSInteger)XBESectionRows().count) {
-        static NSString *diagID = @"XBEDiagCell";
-        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:diagID];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:diagID];
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            cell.textLabel.font = [UIFont systemFontOfSize:13];
-            cell.detailTextLabel.font = [UIFont systemFontOfSize:13];
-        }
-        NSArray<NSString *> *item = XBEDiagnostics()[indexPath.row];
-        cell.textLabel.text = item[0];
-        cell.detailTextLabel.text = item[1];
-        cell.detailTextLabel.textColor = XBEDiagValueIsBad(item[1])
-            ? [UIColor systemRedColor] : [UIColor secondaryLabelColor];
-        return cell;
-    }
-
     static NSString *cellID = @"XBEKeyCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellID];
     if (!cell) {
