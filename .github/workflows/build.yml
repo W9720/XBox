@@ -48,8 +48,11 @@ jobs:
 
       - name: 编译打包（正式版，无debug）
         run: |
+          set -euo pipefail
           make clean 2>/dev/null || true
           make package FINALPACKAGE=1 ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee build.log
+          echo "--- generated packages:"
+          ls -l packages/ || true
 
       - name: 上传deb文件
         uses: actions/upload-artifact@v4
